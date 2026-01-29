@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="61.543896mm"
+   height="61.543533mm"
+   viewBox="0 0 61.543896 61.543533"
+   version="1.1"
+   id="svg1"
+   xml:space="preserve"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+     id="defs1"><linearGradient
+       id="linearGradient15"><stop
+         style="stop-color:#4c24c3;stop-opacity:1;"
+         offset="0"
+         id="stop15" /><stop
+         style="stop-color:#a82284;stop-opacity:1;"
+         offset="0.48124999"
+         id="stop18" /><stop
+         style="stop-color:#ff2e96;stop-opacity:1;"
+         offset="1"
+         id="stop16" /></linearGradient><linearGradient
+       xlink:href="#linearGradient15"
+       id="linearGradient55"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="matrix(0.72321525,0,0,0.72321525,54.223635,1216.8704)"
+       x1="165.51025"
+       y1="151.0672"
+       x2="165.51025"
+       y2="65.969566" /></defs><g
+     id="layer1"
+     transform="translate(-143.15121,-1264.581)"><path
+       id="path54"
+       style="display:inline;fill:url(#linearGradient55);stroke-width:0.191351"
+       d="m 173.92317,1264.5808 a 30.771824,30.771824 0 0 0 -30.77196,30.772 30.771824,30.771824 0 0 0 30.77196,30.7716 30.771824,30.771824 0 0 0 30.77195,-30.7716 30.771824,30.771824 0 0 0 -30.77195,-30.772 z m -0.0471,5.3638 a 25.643187,25.643187 0 0 1 25.64323,25.6433 25.643187,25.643187 0 0 1 -6.46817,17.0261 c -4.28934,-9.5753 -13.13108,-9.9435 -13.13108,-9.9435 l -5.42508,0.089 -7.3e-4,-0.066 -5.74052,-0.094 c 0,0 -9.03394,0.3762 -13.2686,10.257 -0.0619,0.1445 -0.11792,0.2874 -0.16817,0.428 a 25.643187,25.643187 0 0 1 -7.08412,-17.6959 25.643187,25.643187 0 0 1 25.64324,-25.6432 z m 0.0321,8.181 a 11.400505,10.962023 0 0 0 -11.40068,10.962 11.400505,10.962023 0 0 0 11.40068,10.9619 11.400505,10.962023 0 0 0 11.40032,-10.9619 11.400505,10.962023 0 0 0 -11.40032,-10.962 z" /></g></svg>
