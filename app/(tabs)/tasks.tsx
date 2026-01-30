@@ -1,11 +1,37 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar, SafeAreaView, Platform, TextInput, Dimensions, Modal, Alert } from 'react-native';
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  StatusBar,
+  SafeAreaView,
+  Platform,
+  TextInput,
+  Dimensions,
+  Modal,
+  Alert,
+  Animated,
+  PanResponder,
+  LayoutChangeEvent,
+  LayoutAnimation,
+  UIManager
+} from 'react-native';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
 import { Task } from '../../src/types';
 import { TaskCard } from '../../src/components/cards/TaskCard';
 
-const { width } = Dimensions.get('window');
+// Enable LayoutAnimation for Android
+if (Platform.OS === 'android') {
+  if (UIManager.setLayoutAnimationEnabledExperimental) {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+}
+
+const { width, height } = Dimensions.get('window');
 const COLUMN_WIDTH = width * 0.75;
+const COLUMN_MARGIN = 10;
 
 // Mock Data
 const COLUMNS = [
@@ -37,9 +63,24 @@ const PRIORITY_OPTIONS = [
   { label: 'Low', value: 'low', color: '#4caf50' },
 ];
 
+interface ColumnLayout {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  id: string;
+}
+
 export default function TasksScreen() {
   const [tasks, setTasks] = useState<Task[]>(INITIAL_TASKS);
   const [searchText, setSearchText] = useState('');
+
+  // Drag & Drop State
+  const [draggingTask, setDraggingTask] = useState<Task | null>(null);
+  const [draggingTaskLayout, setDraggingTaskLayout] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
+  const pan = useRef(new Animated.ValueXY()).current;
+  const scrollOffset = useRef(0);
+  const columnLayouts = useRef<{ [key: string]: ColumnLayout }>({});
 
   // Modal State
   const [modalVisible, setModalVisible] = useState(false);
@@ -51,6 +92,86 @@ export default function TasksScreen() {
   const [selectedTag, setSelectedTag] = useState(TAG_OPTIONS[0]);
   const [selectedPriority, setSelectedPriority] = useState(PRIORITY_OPTIONS[1]); // Medium default
   const [selectedColumn, setSelectedColumn] = useState('todo');
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e, gestureState) => {
+        // We'll handle the "pick up" logic in the LongPress of individual items, 
+        // but updating the animated value starts here if we were dragging immediately.
+        // For this implementation, we rely on state TRIGGERING the render of the absolute view.
+        pan.setOffset({
+          x: pan.x._value,
+          y: pan.y._value
+        });
+        pan.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: Animated.event(
+        [null, { dx: pan.x, dy: pan.y }],
+        { useNativeDriver: false }
+      ),
+      onPanResponderRelease: (e, gestureState) => {
+        pan.flattenOffset();
+        handleDrop(gestureState.moveX, gestureState.moveY);
+      },
+      onPanResponderTerminate: () => {
+        // Cancel drag
+        setDraggingTask(null);
+        setDraggingTaskLayout(null);
+      }
+    })
+  ).current;
+
+  // We actually need to attach PanResponder dynamically or use a simpler approach.
+  // The Overlay needs the PanResponder attached to IT once it appears.
+  // Let's modify: The OverlayView will capture gestures.
+
+  const handleLongPressTask = (task: Task, pageX: number, pageY: number, width: number, height: number) => {
+    // Initial start position
+    pan.setValue({ x: pageX, y: pageY });
+    pan.setOffset({ x: -width / 2, y: -height / 2 }); // Center finger roughly
+
+    setDraggingTaskLayout({ x: pageX, y: pageY, width, height });
+    setDraggingTask(task);
+  };
+
+  const handleDrop = (dropX: number, dropY: number) => {
+    if (!draggingTask) return;
+
+    // Find which column we land on
+    let targetColumnId = null;
+
+    // We must adjust for Horizontal Scroll
+    // Screen X coordinate of a column = Column.x - scrollOffset.current
+
+    Object.values(columnLayouts.current).forEach(col => {
+      const colScreenX = col.x - scrollOffset.current;
+
+      // Simple collision detection
+      if (
+        dropX > colScreenX &&
+        dropX < colScreenX + col.width &&
+        dropY > col.y && // Assuming Y is relative to screen or consistent container
+        dropY < col.y + col.height
+      ) {
+        targetColumnId = col.id;
+      }
+    });
+
+    if (targetColumnId && targetColumnId !== draggingTask.columnId) {
+      // Move task
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setTasks(prev => prev.map(t =>
+        t.id === draggingTask.id ? { ...t, columnId: targetColumnId } : t
+      ));
+    }
+
+    // Reset
+    setDraggingTask(null);
+    setDraggingTaskLayout(null);
+    pan.setValue({ x: 0, y: 0 });
+  };
 
   const getPriorityColor = (priority: string) => {
     switch (priority) {
@@ -71,6 +192,7 @@ export default function TasksScreen() {
   };
 
   const openEditModal = (task: any) => {
+    if (draggingTask) return; // Prevent opening while dragging
     setIsEditing(true);
     setSelectedTask(task);
     setTaskTitle(task.title);
@@ -147,8 +269,6 @@ export default function TasksScreen() {
 
   const filteredTasks = tasks.filter(t => t.title.toLowerCase().includes(searchText.toLowerCase()));
 
-
-
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#455a64" />
@@ -177,12 +297,25 @@ export default function TasksScreen() {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.boardScrollContent}
           decelerationRate="fast"
-          snapToInterval={COLUMN_WIDTH + 20} // Width + Margin
+          snapToInterval={COLUMN_WIDTH + (COLUMN_MARGIN * 2)} // Width + Margin
+          onScroll={(e) => {
+            scrollOffset.current = e.nativeEvent.contentOffset.x;
+          }}
+          scrollEventThrottle={16}
         >
           {COLUMNS.map((col) => {
             const colTasks = filteredTasks.filter(t => t.columnId === col.id);
             return (
-              <View key={col.id} style={styles.column}>
+              <View
+                key={col.id}
+                style={styles.column}
+                onLayout={(e) => {
+                  columnLayouts.current[col.id] = {
+                    ...e.nativeEvent.layout,
+                    id: col.id
+                  };
+                }}
+              >
                 {/* Column Header */}
                 <View style={[styles.columnHeader, { borderTopColor: col.color }]}>
                   <Text style={styles.columnTitle}>{col.title}</Text>
@@ -194,10 +327,12 @@ export default function TasksScreen() {
                 {/* Tasks List */}
                 <ScrollView style={styles.tasksList} showsVerticalScrollIndicator={false}>
                   {colTasks.map((task, index) => (
-                    <TaskCard
-                      key={task.id || index}
+                    <DraggableTaskItem
+                      key={task.id}
                       task={task}
-                      onPress={openEditModal}
+                      isHidden={draggingTask?.id === task.id}
+                      onLongPress={handleLongPressTask}
+                      onPress={() => openEditModal(task)}
                     />
                   ))}
                   <TouchableOpacity style={styles.addTaskCard} onPress={(() => {
@@ -205,7 +340,7 @@ export default function TasksScreen() {
                     setTaskTitle('');
                     setSelectedTag(TAG_OPTIONS[0]);
                     setSelectedPriority(PRIORITY_OPTIONS[1]);
-                    setSelectedColumn(col.id); // Auto-select this column
+                    setSelectedColumn(col.id);
                     setModalVisible(true);
                   })}>
                     <Ionicons name="add" size={20} color="#999" />
@@ -218,6 +353,22 @@ export default function TasksScreen() {
           })}
         </ScrollView>
       </View>
+
+      {/* Global Drag Overlay */}
+      {draggingTask && draggingTaskLayout && (
+        <Animated.View
+          style={[
+            styles.dragOverlay,
+            {
+              width: draggingTaskLayout.width,
+              transform: [{ translateX: pan.x }, { translateY: pan.y }],
+            }
+          ]}
+          {...panResponder.panHandlers}
+        >
+          <TaskCard task={draggingTask} onPress={() => { }} />
+        </Animated.View>
+      )}
 
       {/* ADD/EDIT MODAL */}
       <Modal
@@ -308,10 +459,39 @@ export default function TasksScreen() {
   );
 }
 
+// Wrapper to handle measuring
+const DraggableTaskItem = ({ task, isHidden, onLongPress, onPress }: {
+  task: Task,
+  isHidden: boolean,
+  onLongPress: (t: Task, px: number, py: number, w: number, h: number) => void,
+  onPress: () => void
+}) => {
+  const viewRef = useRef<View>(null);
+
+  const handleLongPress = () => {
+    // Measure position
+    viewRef.current?.measure((x, y, width, height, pageX, pageY) => {
+      onLongPress(task, pageX, pageY, width, height);
+    });
+  };
+
+  return (
+    <TouchableOpacity
+      ref={viewRef}
+      onLongPress={handleLongPress}
+      onPress={onPress}
+      activeOpacity={0.8}
+      style={{ opacity: isHidden ? 0 : 1 }}
+    >
+      <TaskCard task={task} />
+    </TouchableOpacity>
+  );
+};
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1A5D48', // User preferred color
+    backgroundColor: '#1A5D48',
   },
   header: {
     paddingTop: Platform.OS === 'android' ? 40 : 10,
@@ -319,7 +499,7 @@ const styles = StyleSheet.create({
     paddingBottom: 15,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1A5D48', // User preferred color
+    backgroundColor: '#1A5D48',
     zIndex: 10,
   },
   searchBar: {
@@ -350,7 +530,7 @@ const styles = StyleSheet.create({
   column: {
     width: COLUMN_WIDTH,
     backgroundColor: '#eceff1',
-    marginHorizontal: 10,
+    marginHorizontal: COLUMN_MARGIN,
     borderRadius: 12,
     height: '88%',
     paddingBottom: 10,
@@ -570,5 +750,12 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
     fontSize: 16,
+  },
+  dragOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    zIndex: 1000,
+    elevation: 999,
   }
 });
