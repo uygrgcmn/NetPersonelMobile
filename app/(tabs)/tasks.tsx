@@ -13,14 +13,19 @@ import {
   Modal,
   Alert,
   Animated,
-  PanResponder,
-  LayoutChangeEvent,
   LayoutAnimation,
   UIManager
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
 import { Task } from '../../src/types';
 import { TaskCard } from '../../src/components/cards/TaskCard';
+import {
+  GestureHandlerRootView,
+  PanGestureHandler,
+  State,
+  PanGestureHandlerStateChangeEvent,
+  PanGestureHandlerGestureEvent
+} from 'react-native-gesture-handler';
 
 // Enable LayoutAnimation for Android
 if (Platform.OS === 'android') {
@@ -77,9 +82,27 @@ export default function TasksScreen() {
 
   // Drag & Drop State
   const [draggingTask, setDraggingTask] = useState<Task | null>(null);
-  const [draggingTaskLayout, setDraggingTaskLayout] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
-  const pan = useRef(new Animated.ValueXY()).current;
+  const [draggingSize, setDraggingSize] = useState<{ width: number, height: number } | null>(null);
+
+  // We use Animated.Value to track absolute coordinates of the drag
+  const dragPos = useRef(new Animated.ValueXY()).current;
+
+  // To track values for drop logic (collision detection) in JS thread
+  const currDragPos = useRef({ x: 0, y: 0 });
+
+  const scrollViewRef = useRef<ScrollView>(null);
+  const autoScrollFrame = useRef<number | null>(null);
   const scrollOffset = useRef(0);
+  const targetScrollOffset = useRef(0);
+  const contentWidth = useRef(0);
+
+  // No listener needed anymore, we update manually
+  useEffect(() => {
+    return () => {
+      if (autoScrollFrame.current) cancelAnimationFrame(autoScrollFrame.current);
+    };
+  }, []);
+
   const columnLayouts = useRef<{ [key: string]: ColumnLayout }>({});
 
   // Modal State
@@ -90,69 +113,108 @@ export default function TasksScreen() {
   // Form State
   const [taskTitle, setTaskTitle] = useState('');
   const [selectedTag, setSelectedTag] = useState(TAG_OPTIONS[0]);
-  const [selectedPriority, setSelectedPriority] = useState(PRIORITY_OPTIONS[1]); // Medium default
+  const [selectedPriority, setSelectedPriority] = useState(PRIORITY_OPTIONS[1]);
   const [selectedColumn, setSelectedColumn] = useState('todo');
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e, gestureState) => {
-        // We'll handle the "pick up" logic in the LongPress of individual items, 
-        // but updating the animated value starts here if we were dragging immediately.
-        // For this implementation, we rely on state TRIGGERING the render of the absolute view.
-        pan.setOffset({
-          x: pan.x._value,
-          y: pan.y._value
-        });
-        pan.setValue({ x: 0, y: 0 });
-      },
-      onPanResponderMove: Animated.event(
-        [null, { dx: pan.x, dy: pan.y }],
-        { useNativeDriver: false }
-      ),
-      onPanResponderRelease: (e, gestureState) => {
-        pan.flattenOffset();
-        handleDrop(gestureState.moveX, gestureState.moveY);
-      },
-      onPanResponderTerminate: () => {
-        // Cancel drag
-        setDraggingTask(null);
-        setDraggingTaskLayout(null);
+
+  // -------------- Drag Handlers for Items --------------
+
+  const runAutoScroll = () => {
+    const x = currDragPos.current.x;
+    const SCROLL_THRESHOLD = 50;
+    const SCROLL_SPEED = 10; // Pixels per frame
+
+    // We scroll based on the independent target offset
+    // verifying bounds roughly to avoid huge numbers, but letting native clamp mostly.
+    const MAX_SCROLL = contentWidth.current > 0 ? contentWidth.current - width : 5000;
+
+    let needsScroll = false;
+    let newOffset = targetScrollOffset.current;
+
+    if (x > width - SCROLL_THRESHOLD) {
+      // Scroll Right
+      if (targetScrollOffset.current < MAX_SCROLL) {
+        newOffset = targetScrollOffset.current + SCROLL_SPEED;
+        needsScroll = true;
       }
-    })
-  ).current;
+    } else if (x < SCROLL_THRESHOLD) {
+      // Scroll Left
+      if (targetScrollOffset.current > 0) {
+        newOffset = Math.max(0, targetScrollOffset.current - SCROLL_SPEED);
+        needsScroll = true;
+      }
+    }
 
-  // We actually need to attach PanResponder dynamically or use a simpler approach.
-  // The Overlay needs the PanResponder attached to IT once it appears.
-  // Let's modify: The OverlayView will capture gestures.
+    if (needsScroll && scrollViewRef.current) {
+      targetScrollOffset.current = newOffset;
+      scrollViewRef.current.scrollTo({ x: newOffset, animated: false });
+    }
 
-  const handleLongPressTask = (task: Task, pageX: number, pageY: number, width: number, height: number) => {
-    // Initial start position
-    pan.setValue({ x: pageX, y: pageY });
-    pan.setOffset({ x: -width / 2, y: -height / 2 }); // Center finger roughly
-
-    setDraggingTaskLayout({ x: pageX, y: pageY, width, height });
-    setDraggingTask(task);
+    // Continue loop
+    autoScrollFrame.current = requestAnimationFrame(runAutoScroll);
   };
 
-  const handleDrop = (dropX: number, dropY: number) => {
+  // Manual Event Handler
+  const onDragGestureEvent = (event: PanGestureHandlerGestureEvent) => {
+    const { absoluteX, absoluteY } = event.nativeEvent;
+
+    // 1. Update Logic Position
+    currDragPos.current = { x: absoluteX, y: absoluteY };
+
+    // 2. Update Visual Position (Overlay)
+    dragPos.setValue({ x: absoluteX, y: absoluteY });
+  };
+
+  const onDragStateChange = (event: PanGestureHandlerStateChangeEvent, task: Task) => {
+    if (event.nativeEvent.state === State.ACTIVE) {
+      // START DRAG
+      setDraggingTask(task);
+      setDraggingSize({ width: COLUMN_WIDTH - 20, height: 100 });
+
+      const { absoluteX, absoluteY } = event.nativeEvent;
+
+      // Update logic & visual explicitly on start
+      currDragPos.current = { x: absoluteX, y: absoluteY };
+      dragPos.setValue({ x: absoluteX, y: absoluteY });
+
+      // Initialize target/virtual scroll position from the last known real position
+      targetScrollOffset.current = scrollOffset.current;
+
+      // Start Auto Scroll Loop
+      if (autoScrollFrame.current) cancelAnimationFrame(autoScrollFrame.current);
+      runAutoScroll();
+
+    } else if (event.nativeEvent.state === State.END || event.nativeEvent.state === State.CANCELLED || event.nativeEvent.state === State.FAILED) {
+      // END DRAG
+      handleDrop();
+      setDraggingTask(null);
+      setDraggingSize(null);
+
+      // Stop Auto Scroll
+      if (autoScrollFrame.current) {
+        cancelAnimationFrame(autoScrollFrame.current);
+        autoScrollFrame.current = null;
+      }
+    }
+  };
+
+  const handleDrop = () => {
+    // Collision Detection
+    const dropX = currDragPos.current.x;
+    const dropY = currDragPos.current.y;
+
     if (!draggingTask) return;
 
-    // Find which column we land on
-    let targetColumnId = null;
-
-    // We must adjust for Horizontal Scroll
-    // Screen X coordinate of a column = Column.x - scrollOffset.current
+    let targetColumnId: string | null = null;
 
     Object.values(columnLayouts.current).forEach(col => {
       const colScreenX = col.x - scrollOffset.current;
 
-      // Simple collision detection
+      // Check if within column bounds
       if (
         dropX > colScreenX &&
         dropX < colScreenX + col.width &&
-        dropY > col.y && // Assuming Y is relative to screen or consistent container
+        dropY > col.y &&
         dropY < col.y + col.height
       ) {
         targetColumnId = col.id;
@@ -160,28 +222,16 @@ export default function TasksScreen() {
     });
 
     if (targetColumnId && targetColumnId !== draggingTask.columnId) {
-      // Move task
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setTasks(prev => prev.map(t =>
-        t.id === draggingTask.id ? { ...t, columnId: targetColumnId } : t
+        t.id === draggingTask.id ? { ...t, columnId: targetColumnId! } : t
       ));
     }
-
-    // Reset
-    setDraggingTask(null);
-    setDraggingTaskLayout(null);
-    pan.setValue({ x: 0, y: 0 });
   };
 
-  const getPriorityColor = (priority: string) => {
-    switch (priority) {
-      case 'high': return '#f44336';
-      case 'medium': return '#ff9800';
-      case 'low': return '#4caf50';
-      default: return '#ccc';
-    }
-  };
 
+  // -------------- Modal & Task Logic --------------
+  // (Same as before)
   const openAddModal = () => {
     setIsEditing(false);
     setTaskTitle('');
@@ -192,16 +242,14 @@ export default function TasksScreen() {
   };
 
   const openEditModal = (task: any) => {
-    if (draggingTask) return; // Prevent opening while dragging
+    if (draggingTask) return;
     setIsEditing(true);
     setSelectedTask(task);
     setTaskTitle(task.title);
 
-    // Find matching tag option or default
     const tagOpt = TAG_OPTIONS.find(t => t.label === task.tag) || TAG_OPTIONS[0];
     setSelectedTag(tagOpt);
 
-    // Find matching priority option
     const prioOpt = PRIORITY_OPTIONS.find(p => p.value === task.priority) || PRIORITY_OPTIONS[1];
     setSelectedPriority(prioOpt);
 
@@ -216,7 +264,6 @@ export default function TasksScreen() {
     }
 
     if (isEditing && selectedTask) {
-      // Update existing
       const updatedTasks = tasks.map(t => {
         if (t.id === selectedTask.id) {
           return {
@@ -232,7 +279,6 @@ export default function TasksScreen() {
       });
       setTasks(updatedTasks);
     } else {
-      // Add new
       const newTask: Task = {
         id: Date.now().toString(),
         columnId: selectedColumn,
@@ -243,7 +289,7 @@ export default function TasksScreen() {
         comments: 0,
         attachments: 0,
         date: 'Yeni',
-        assignee: 'B', // Ben (User)
+        assignee: 'B',
       };
       setTasks([...tasks, newTask]);
     }
@@ -270,221 +316,239 @@ export default function TasksScreen() {
   const filteredTasks = tasks.filter(t => t.title.toLowerCase().includes(searchText.toLowerCase()));
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#455a64" />
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="light-content" backgroundColor="#455a64" />
 
-      {/* Top Bar */}
-      <View style={styles.header}>
-        <View style={styles.searchBar}>
-          <Ionicons name="search" size={20} color="#fff" />
-          <TextInput
-            placeholder="Görev ara..."
-            placeholderTextColor="rgba(255,255,255,0.6)"
-            style={styles.searchInput}
-            value={searchText}
-            onChangeText={setSearchText}
-          />
+        {/* Top Bar */}
+        <View style={styles.header}>
+          <View style={styles.searchBar}>
+            <Ionicons name="search" size={20} color="#fff" />
+            <TextInput
+              placeholder="Görev ara..."
+              placeholderTextColor="rgba(255,255,255,0.6)"
+              style={styles.searchInput}
+              value={searchText}
+              onChangeText={setSearchText}
+            />
+          </View>
+          <TouchableOpacity style={styles.addBtn} onPress={openAddModal}>
+            <Ionicons name="add" size={30} color="#fff" />
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity style={styles.addBtn} onPress={openAddModal}>
-          <Ionicons name="add" size={30} color="#fff" />
-        </TouchableOpacity>
-      </View>
 
-      {/* Kanban Board */}
-      <View style={styles.boardContainer}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.boardScrollContent}
-          decelerationRate="fast"
-          snapToInterval={COLUMN_WIDTH + (COLUMN_MARGIN * 2)} // Width + Margin
-          onScroll={(e) => {
-            scrollOffset.current = e.nativeEvent.contentOffset.x;
-          }}
-          scrollEventThrottle={16}
-        >
-          {COLUMNS.map((col) => {
-            const colTasks = filteredTasks.filter(t => t.columnId === col.id);
-            return (
-              <View
-                key={col.id}
-                style={styles.column}
-                onLayout={(e) => {
-                  columnLayouts.current[col.id] = {
-                    ...e.nativeEvent.layout,
-                    id: col.id
-                  };
-                }}
-              >
-                {/* Column Header */}
-                <View style={[styles.columnHeader, { borderTopColor: col.color }]}>
-                  <Text style={styles.columnTitle}>{col.title}</Text>
-                  <View style={styles.countBadge}>
-                    <Text style={styles.countText}>{colTasks.length}</Text>
+        {/* Kanban Board */}
+        <View style={styles.boardContainer}>
+          <ScrollView
+            ref={scrollViewRef}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.boardScrollContent}
+            decelerationRate="fast"
+            snapToInterval={COLUMN_WIDTH + (COLUMN_MARGIN * 2)} // Width + Margin
+            onScroll={(e) => {
+              scrollOffset.current = e.nativeEvent.contentOffset.x;
+            }}
+            onContentSizeChange={(w, h) => {
+              contentWidth.current = w;
+            }}
+            scrollEventThrottle={16}
+          >
+            {COLUMNS.map((col) => {
+              const colTasks = filteredTasks.filter(t => t.columnId === col.id);
+              return (
+                <View
+                  key={col.id}
+                  style={styles.column}
+                  onLayout={(e) => {
+                    columnLayouts.current[col.id] = {
+                      ...e.nativeEvent.layout,
+                      id: col.id
+                    };
+                  }}
+                >
+                  {/* Column Header */}
+                  <View style={[styles.columnHeader, { borderTopColor: col.color }]}>
+                    <Text style={styles.columnTitle}>{col.title}</Text>
+                    <View style={styles.countBadge}>
+                      <Text style={styles.countText}>{colTasks.length}</Text>
+                    </View>
                   </View>
+
+                  {/* Tasks List */}
+                  <ScrollView style={styles.tasksList} showsVerticalScrollIndicator={false}>
+                    {colTasks.map((task, index) => (
+                      <DraggableTaskItem
+                        key={task.id}
+                        task={task}
+                        isHidden={draggingTask?.id === task.id}
+                        onGestureEvent={onDragGestureEvent}
+                        onStateChange={(e) => onDragStateChange(e, task)}
+                        onPress={() => openEditModal(task)}
+                      />
+                    ))}
+                    <TouchableOpacity style={styles.addTaskCard} onPress={(() => {
+                      setIsEditing(false);
+                      setTaskTitle('');
+                      setSelectedTag(TAG_OPTIONS[0]);
+                      setSelectedPriority(PRIORITY_OPTIONS[1]);
+                      setSelectedColumn(col.id);
+                      setModalVisible(true);
+                    })}>
+                      <Ionicons name="add" size={20} color="#999" />
+                      <Text style={styles.addTaskText}>Kart Ekle</Text>
+                    </TouchableOpacity>
+                    <View style={{ height: 20 }} />
+                  </ScrollView>
+                </View>
+              )
+            })}
+          </ScrollView>
+        </View>
+
+        {/* Global Drag Overlay */}
+        {draggingTask && (
+          <Animated.View
+            style={[
+              styles.dragOverlay,
+              {
+                top: 0, left: 0,
+                // Position exactly at absolute coordinates
+                // Centering logic: subtract half width/height
+                transform: [
+                  { translateX: Animated.subtract(dragPos.x, (draggingSize?.width || 0) / 2) },
+                  { translateY: Animated.subtract(dragPos.y, (draggingSize?.height || 50) / 2) }
+                ],
+                width: draggingSize?.width,
+              }
+            ]}
+            pointerEvents="none" // The gesture is driven by the original item, so overlay ignores touches
+          >
+            <TaskCard task={draggingTask} onPress={() => { }} />
+          </Animated.View>
+        )}
+
+        {/* ADD/EDIT MODAL */}
+        <Modal
+          animationType="slide"
+          transparent={true}
+          visible={modalVisible}
+          onRequestClose={() => setModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>{isEditing ? 'Görevi Düzenle' : 'Yeni Görev'}</Text>
+                <TouchableOpacity onPress={() => setModalVisible(false)}>
+                  <Ionicons name="close" size={24} color="#333" />
+                </TouchableOpacity>
+              </View>
+
+              {/* Inputs */}
+              <ScrollView>
+                <Text style={styles.label}>Başlık</Text>
+                <TextInput
+                  style={styles.input}
+                  value={taskTitle}
+                  onChangeText={setTaskTitle}
+                  placeholder="Görev başlığı giriniz"
+                />
+
+                <Text style={styles.label}>Etiket</Text>
+                <View style={styles.optionsRow}>
+                  {TAG_OPTIONS.map(tag => (
+                    <TouchableOpacity
+                      key={tag.label}
+                      style={[styles.optionBadge, selectedTag.label === tag.label && styles.selectedOption]}
+                      onPress={() => setSelectedTag(tag)}
+                    >
+                      <Text style={[styles.optionText, selectedTag.label === tag.label && { color: tag.color }]}>{tag.label}</Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
 
-                {/* Tasks List */}
-                <ScrollView style={styles.tasksList} showsVerticalScrollIndicator={false}>
-                  {colTasks.map((task, index) => (
-                    <DraggableTaskItem
-                      key={task.id}
-                      task={task}
-                      isHidden={draggingTask?.id === task.id}
-                      onLongPress={handleLongPressTask}
-                      onPress={() => openEditModal(task)}
-                    />
+                <Text style={styles.label}>Öncelik</Text>
+                <View style={styles.optionsRow}>
+                  {PRIORITY_OPTIONS.map(prio => (
+                    <TouchableOpacity
+                      key={prio.value}
+                      style={[styles.optionBadge, selectedPriority.value === prio.value && styles.selectedOption]}
+                      onPress={() => setSelectedPriority(prio)}
+                    >
+                      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: prio.color, marginRight: 6 }} />
+                      <Text style={styles.optionText}>{prio.label}</Text>
+                    </TouchableOpacity>
                   ))}
-                  <TouchableOpacity style={styles.addTaskCard} onPress={(() => {
-                    setIsEditing(false);
-                    setTaskTitle('');
-                    setSelectedTag(TAG_OPTIONS[0]);
-                    setSelectedPriority(PRIORITY_OPTIONS[1]);
-                    setSelectedColumn(col.id);
-                    setModalVisible(true);
-                  })}>
-                    <Ionicons name="add" size={20} color="#999" />
-                    <Text style={styles.addTaskText}>Kart Ekle</Text>
+                </View>
+
+                <Text style={styles.label}>Durum (Sütun)</Text>
+                <View style={styles.columnOptionsContainer}>
+                  {COLUMNS.map(col => (
+                    <TouchableOpacity
+                      key={col.id}
+                      style={[styles.columnOption, selectedColumn === col.id && { borderColor: col.color, backgroundColor: col.color + '10' }]}
+                      onPress={() => setSelectedColumn(col.id)}
+                    >
+                      <Text style={[styles.columnOptionText, selectedColumn === col.id && { color: col.color, fontWeight: 'bold' }]}>
+                        {col.title}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+              </ScrollView>
+
+              {/* Actions */}
+              <View style={styles.modalActions}>
+                {isEditing && (
+                  <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete}>
+                    <Feather name="trash-2" size={20} color="#f44336" />
                   </TouchableOpacity>
-                  <View style={{ height: 20 }} />
-                </ScrollView>
-              </View>
-            )
-          })}
-        </ScrollView>
-      </View>
-
-      {/* Global Drag Overlay */}
-      {draggingTask && draggingTaskLayout && (
-        <Animated.View
-          style={[
-            styles.dragOverlay,
-            {
-              width: draggingTaskLayout.width,
-              transform: [{ translateX: pan.x }, { translateY: pan.y }],
-            }
-          ]}
-          {...panResponder.panHandlers}
-        >
-          <TaskCard task={draggingTask} onPress={() => { }} />
-        </Animated.View>
-      )}
-
-      {/* ADD/EDIT MODAL */}
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={modalVisible}
-        onRequestClose={() => setModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{isEditing ? 'Görevi Düzenle' : 'Yeni Görev'}</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Ionicons name="close" size={24} color="#333" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Inputs */}
-            <ScrollView>
-              <Text style={styles.label}>Başlık</Text>
-              <TextInput
-                style={styles.input}
-                value={taskTitle}
-                onChangeText={setTaskTitle}
-                placeholder="Görev başlığı giriniz"
-              />
-
-              <Text style={styles.label}>Etiket</Text>
-              <View style={styles.optionsRow}>
-                {TAG_OPTIONS.map(tag => (
-                  <TouchableOpacity
-                    key={tag.label}
-                    style={[styles.optionBadge, selectedTag.label === tag.label && styles.selectedOption]}
-                    onPress={() => setSelectedTag(tag)}
-                  >
-                    <Text style={[styles.optionText, selectedTag.label === tag.label && { color: tag.color }]}>{tag.label}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <Text style={styles.label}>Öncelik</Text>
-              <View style={styles.optionsRow}>
-                {PRIORITY_OPTIONS.map(prio => (
-                  <TouchableOpacity
-                    key={prio.value}
-                    style={[styles.optionBadge, selectedPriority.value === prio.value && styles.selectedOption]}
-                    onPress={() => setSelectedPriority(prio)}
-                  >
-                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: prio.color, marginRight: 6 }} />
-                    <Text style={styles.optionText}>{prio.label}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <Text style={styles.label}>Durum (Sütun)</Text>
-              <View style={styles.columnOptionsContainer}>
-                {COLUMNS.map(col => (
-                  <TouchableOpacity
-                    key={col.id}
-                    style={[styles.columnOption, selectedColumn === col.id && { borderColor: col.color, backgroundColor: col.color + '10' }]}
-                    onPress={() => setSelectedColumn(col.id)}
-                  >
-                    <Text style={[styles.columnOptionText, selectedColumn === col.id && { color: col.color, fontWeight: 'bold' }]}>
-                      {col.title}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-            </ScrollView>
-
-            {/* Actions */}
-            <View style={styles.modalActions}>
-              {isEditing && (
-                <TouchableOpacity style={styles.deleteBtn} onPress={handleDelete}>
-                  <Feather name="trash-2" size={20} color="#f44336" />
+                )}
+                <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
+                  <Text style={styles.saveBtnText}>Kaydet</Text>
                 </TouchableOpacity>
-              )}
-              <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
-                <Text style={styles.saveBtnText}>Kaydet</Text>
-              </TouchableOpacity>
+              </View>
             </View>
           </View>
-        </View>
-      </Modal>
+        </Modal>
 
-    </SafeAreaView>
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 
-// Wrapper to handle measuring
-const DraggableTaskItem = ({ task, isHidden, onLongPress, onPress }: {
+// Wrapper to handle Gesture Handler
+// Note: We use PanGestureHandler with activation delay for Long Press effect
+const DraggableTaskItem = ({
+  task,
+  isHidden,
+  onGestureEvent,
+  onStateChange,
+  onPress
+}: {
   task: Task,
   isHidden: boolean,
-  onLongPress: (t: Task, px: number, py: number, w: number, h: number) => void,
+  onGestureEvent: any,
+  onStateChange: (e: any) => void,
   onPress: () => void
 }) => {
-  const viewRef = useRef<View>(null);
 
-  const handleLongPress = () => {
-    // Measure position
-    viewRef.current?.measure((x, y, width, height, pageX, pageY) => {
-      onLongPress(task, pageX, pageY, width, height);
-    });
-  };
+  // We treat "Tap" separately from "LongPress Drag"
+  // RNGH handles this: if we tap quickly, it fails the Pan. If we hold, Pan activates.
+  // However, for single tap support, we might need a TapGestureHandler or just standard Touchable inside.
+  // Making it simple: PanGestureHandler wrapper around Touchable.
 
   return (
-    <TouchableOpacity
-      ref={viewRef}
-      onLongPress={handleLongPress}
-      onPress={onPress}
-      activeOpacity={0.8}
-      style={{ opacity: isHidden ? 0 : 1 }}
+    <PanGestureHandler
+      activateAfterLongPress={300}
+      onGestureEvent={onGestureEvent}
+      onHandlerStateChange={onStateChange}
     >
-      <TaskCard task={task} />
-    </TouchableOpacity>
+      <Animated.View style={{ opacity: isHidden ? 0 : 1 }}>
+        <TaskCard task={task} onPress={onPress} />
+      </Animated.View>
+    </PanGestureHandler>
   );
 };
 
