@@ -11,7 +11,7 @@ export const DashboardCard: React.FC<DashboardCardProps> = ({ item }) => {
     const IconComp = item.iconLib;
 
     return (
-        <TouchableOpacity style={styles.card} activeOpacity={0.9}>
+        <View style={styles.card}>
             <View style={[styles.iconContainer, { backgroundColor: item.color + '15' }]}>
                 <IconComp name={item.icon} size={28} color={item.color} />
             </View>
@@ -20,8 +20,7 @@ export const DashboardCard: React.FC<DashboardCardProps> = ({ item }) => {
                 <Text style={styles.cardTitle}>{item.title}</Text>
                 <Text style={styles.cardSubtext}>{item.subtext}</Text>
             </View>
-            <MaterialCommunityIcons name="chevron-right" size={20} color="#ddd" style={styles.arrowIcon} />
-        </TouchableOpacity>
+        </View>
     );
 };
 

@@ -46,15 +46,7 @@ const DASHBOARD_ITEMS = [
         color: '#ff9800', // Orange
         subtext: 'Katılım Bekleyen'
     },
-    {
-        id: '5',
-        title: 'Atama Grupları',
-        count: '5',
-        icon: 'account-group',
-        iconLib: MaterialCommunityIcons,
-        color: '#e91e63', // Pink
-        subtext: 'Grup Sayısı'
-    },
+
     {
         id: '6',
         title: 'Dosyalar',
